@@ -1,0 +1,9 @@
+# Cloudflare Pages config for the SIE Study Engine — https://sie-prep-engine.pages.dev/
+name = "sie-prep-engine"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-10-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sie-progress"
+database_id = "ab9b8251-f15b-4289-9c47-d6d9c4e64169"

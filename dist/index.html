@@ -456,6 +456,31 @@
         .reset:hover {
             color: #fff;
         }
+        .acct {
+            margin-bottom: 12px;
+            font-size: 12px;
+            color: var(--text-on-nav-2);
+        }
+        .acct-email {
+            color: #fff;
+            font-weight: 500;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .acct-row .reset {
+            font-size: 12px;
+        }
+        .gate-returning {
+            margin: 12px 0 0;
+            font-size: 13px;
+            text-align: center;
+            opacity: .8;
+        }
+        .field-group .opt {
+            font-weight: 400;
+            opacity: .7;
+        }
         .build {
             font-weight: 400;
             font-size: 10.5px;
@@ -2464,14 +2489,14 @@
         <div class="gate-card">
             <div class="gate-brand" aria-hidden="true">SIE</div>
             <h1 id="gate-title">Get Instant Access</h1>
-            <p class="sub">
+            <p class="sub" id="gate-sub">
                 <strong>Master the SIE</strong> with adaptive practice, full‑length mocks, and performance tracking.
             </p>
 
             <form id="gate-form" novalidate>
                 <div class="field-group">
-                    <label for="gate-name">Name</label>
-                    <input type="text" id="gate-name" name="name" required placeholder="e.g., Jamie" autocomplete="given-name" />
+                    <label for="gate-name">Name <span class="opt">(new users)</span></label>
+                    <input type="text" id="gate-name" name="name" placeholder="e.g., Jamie" autocomplete="given-name" />
                 </div>
                 <div class="field-group">
                     <label for="gate-email">Email Address</label>
@@ -2480,11 +2505,12 @@
 
                 <div id="gate-error" class="gate-error" style="display: none;" role="alert"></div>
 
-                <button type="submit" id="gate-submit">Get Access</button>
+                <button type="submit" id="gate-submit">Continue</button>
+                <p class="gate-returning">Studied here before? Enter the same email to pick up where you left off.</p>
             </form>
 
             <p class="gate-note">
-                We’ll send you occasional updates. Unsubscribe anytime. <br />
+                Your progress saves to your email automatically. We’ll send occasional updates. Unsubscribe anytime. <br />
                 No spam, ever.
             </p>
         </div>
@@ -2512,6 +2538,10 @@
             <div class="sec-h eyebrow">Sections</div>
             <nav class="sections" id="secNav"></nav>
             <div class="foot">
+                <div class="acct" id="acct" style="display:none">
+                    <div class="acct-email" id="acctEmail"></div>
+                    <div class="acct-row"><span id="syncStatus"></span> · <button class="reset" id="switchAcct">Switch account</button></div>
+                </div>
                 <div class="row">
                     <button class="reset" id="resetBtn">Reset progress</button>
                     <button class="theme-toggle" id="themeToggle" title="Toggle dark/light mode">🌓</button>
@@ -2574,9 +2604,118 @@
         var FORMSPREE_URL = 'https://formspree.io/f/xwleeagq';
 
         // ============================================================
+        //  ACCOUNT SYNC — the email is the account. Same browser: stays
+        //  signed in. New browser: enter the same email to pick up progress.
+        // ============================================================
+        var SYNC_URL = '/api/progress';
+        var EMAIL_KEY = 'sie_user_email';
+        var SYNC_T_KEY = 'sie_sync_t';
+        var ENGINE_KEY = 'sie_engine_v4';
+        var MOCK_KEY = 'sie_mock_v2';
+
+        function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+        function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+        function lsDel(k) { try { localStorage.removeItem(k); } catch (e) {} }
+
+        var sync = {
+            email: function() { return lsGet(EMAIL_KEY); },
+            localT: function() { return Number(lsGet(SYNC_T_KEY)) || 0; },
+            _timer: null,
+
+            fetchRemote: function(email, ms) {
+                var ctl = typeof AbortController !== 'undefined' ? new AbortController() : null;
+                var to = ctl ? setTimeout(function() { ctl.abort(); }, ms || 4000) : null;
+                return fetch(SYNC_URL + '?email=' + encodeURIComponent(email), { signal: ctl ? ctl.signal : undefined })
+                    .then(function(r) { if (!r.ok) throw new Error('status ' + r.status); return r.json(); })
+                    .finally(function() { if (to) clearTimeout(to); });
+            },
+
+            // Copy server progress into this browser's storage.
+            adopt: function(remote) {
+                if (remote.data.engine) lsSet(ENGINE_KEY, JSON.stringify(remote.data.engine)); else lsDel(ENGINE_KEY);
+                if (remote.data.mock) lsSet(MOCK_KEY, JSON.stringify(remote.data.mock)); else lsDel(MOCK_KEY);
+                lsSet(SYNC_T_KEY, String(remote.t));
+            },
+
+            payload: function() {
+                var e = lsGet(ENGINE_KEY), m = lsGet(MOCK_KEY);
+                return { engine: e ? JSON.parse(e) : null, mock: m ? JSON.parse(m) : null };
+            },
+
+            push: function(keepalive) {
+                var email = sync.email();
+                if (!email) return Promise.resolve();
+                var body;
+                try { body = JSON.stringify({ email: email, t: sync.localT(), data: sync.payload() }); } catch (e) { return Promise.resolve(); }
+                return fetch(SYNC_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: body, keepalive: !!keepalive })
+                    .then(function() { setSyncStatus('Saved'); })
+                    .catch(function() { setSyncStatus('Offline — saved on this device'); });
+            },
+
+            // Call after any real progress change; pushes after a short pause.
+            touch: function() {
+                lsSet(SYNC_T_KEY, String(Date.now()));
+                if (!sync.email()) return;
+                clearTimeout(sync._timer);
+                sync._timer = setTimeout(function() { sync._timer = null; sync.push(false); }, 1500);
+            },
+
+            flush: function() {
+                if (sync._timer) { clearTimeout(sync._timer); sync._timer = null; sync.push(true); }
+            }
+        };
+
+        document.addEventListener('visibilitychange', function() { if (document.visibilityState === 'hidden') sync.flush(); });
+        window.addEventListener('pagehide', sync.flush);
+
+        function setSyncStatus(txt) {
+            var el = document.getElementById('syncStatus');
+            if (el) el.textContent = txt;
+        }
+
+        function renderAccount() {
+            var email = sync.email();
+            var who = document.getElementById('acctEmail');
+            if (who) who.textContent = email || '';
+            var box = document.getElementById('acct');
+            if (box) box.style.display = email ? '' : 'none';
+        }
+
+        function startApp() {
+            document.getElementById('gate').classList.add('hidden');
+            document.getElementById('app').classList.add('visible');
+            renderAccount();
+            load();
+            render();
+        }
+
+        // Startup: same browser with a saved email → pull anything newer from
+        // other devices, then open. Otherwise show the gate.
+        function boot() {
+            var email = sync.email();
+            if (!email) { showGate(lsGet('sie_access_granted') === 'true'); load(); render(); return; }
+            setSyncStatus('Syncing…');
+            sync.fetchRemote(email, 3000).then(function(remote) {
+                if (remote.exists && remote.t > sync.localT()) sync.adopt(remote);
+                else if (!remote.exists || remote.t < sync.localT()) sync.push(false);
+                setSyncStatus('Saved');
+            }).catch(function() {
+                setSyncStatus('Offline — saved on this device');
+            }).then(startApp);
+        }
+
+        function switchAccount() {
+            var go = function() {
+                [EMAIL_KEY, SYNC_T_KEY, ENGINE_KEY, MOCK_KEY, 'sie_access_granted'].forEach(lsDel);
+                location.reload();
+            };
+            if (sync._timer) { clearTimeout(sync._timer); sync._timer = null; sync.push(false).then(go); } else go();
+        }
+
+        // ============================================================
         //  GATE LOGIC
         // ============================================================
-        (function setupGate() {
+        function showGate(legacyUser) {
             var gate = document.getElementById('gate');
             var app = document.getElementById('app');
             var form = document.getElementById('gate-form');
@@ -2585,105 +2724,58 @@
             var nameInput = document.getElementById('gate-name');
             var emailInput = document.getElementById('gate-email');
 
-            // Check localStorage — if flag exists, skip gate entirely
-            if (localStorage.getItem('sie_access_granted') === 'true') {
-                gate.classList.add('hidden');
-                app.classList.add('visible');
-                // Init main app after DOM is ready
-                if (typeof load === 'function') {
-                    if (document.readyState === 'loading') {
-                        document.addEventListener('DOMContentLoaded', load);
-                    } else {
-                        load();
-                    }
-                }
-                return;
+            // People who unlocked before accounts existed: keep their local
+            // progress and just ask for an email to save it under.
+            if (legacyUser) {
+                document.getElementById('gate-title').textContent = 'Save your progress';
+                document.getElementById('gate-sub').innerHTML = 'Enter your email so your progress is saved to your account and follows you to any device.';
             }
 
-            // Show gate, hide app
             gate.classList.remove('hidden');
             app.classList.remove('visible');
 
-            form.addEventListener('submit', async function(e) {
+            function fail(msg) {
+                errorEl.textContent = msg;
+                errorEl.style.display = 'block';
+                submitBtn.disabled = false;
+                submitBtn.textContent = 'Continue';
+            }
+
+            form.addEventListener('submit', function(e) {
                 e.preventDefault();
                 errorEl.style.display = 'none';
-                submitBtn.disabled = true;
-                submitBtn.textContent = 'Submitting...';
 
                 var name = nameInput.value.trim();
-                var email = emailInput.value.trim();
+                var email = emailInput.value.trim().toLowerCase();
+                if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return fail('Please enter a valid email address.');
 
-                // ---- Validation ----
-                if (!name || !email) {
-                    errorEl.textContent = 'Please fill in all fields.';
-                    errorEl.style.display = 'block';
-                    submitBtn.disabled = false;
-                    submitBtn.textContent = 'Get Access';
-                    return;
-                }
-                // Simple email format check
-                var emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-                if (!emailPattern.test(email)) {
-                    errorEl.textContent = 'Please enter a valid email address.';
-                    errorEl.style.display = 'block';
-                    submitBtn.disabled = false;
-                    submitBtn.textContent = 'Get Access';
-                    return;
-                }
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Loading your progress…';
 
-                // ---- Set localStorage flag immediately (fail-open) ----
-                localStorage.setItem('sie_access_granted', 'true');
-
-                // ---- Attempt to send to Formspree (non‑blocking) ----
-                try {
-                    var response = await fetch(FORMSPREE_URL, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Accept': 'application/json'
-                        },
-                        body: JSON.stringify({ name: name, email: email })
-                    });
-
-                    // If response is not OK, we still let the user in (flag already set)
-                    if (!response.ok) {
-                        console.warn('Formspree returned non‑OK status:', response.status);
-                        // Show error message but don't prevent access
-                        errorEl.textContent = 'Submission failed (server error). You still have access.';
-                        errorEl.style.display = 'block';
+                sync.fetchRemote(email, 6000).then(function(remote) {
+                    lsSet(EMAIL_KEY, email);
+                    lsSet('sie_access_granted', 'true');
+                    if (remote.exists && remote.t >= sync.localT()) {
+                        sync.adopt(remote);   // returning user on a new browser
+                    } else {
+                        if (!sync.localT()) lsSet(SYNC_T_KEY, String(Date.now()));
+                        sync.push(false);     // new account, or this browser is newer
                     }
-                    // Success: nothing else to do; tool already unlocked below
-                } catch (err) {
-                    // Network error — show friendly message but still unlock
-                    errorEl.textContent = 'Submission failed (network issue). You still have access.';
-                    errorEl.style.display = 'block';
-                    console.warn('Formspree fetch error:', err);
-                }
-
-                // ---- Unlock the tool (always happens after validation) ----
-                gate.classList.add('hidden');
-                app.classList.add('visible');
-                submitBtn.disabled = false;
-                submitBtn.textContent = 'Get Access';
-
-                // Initialize the study engine
-                if (typeof load === 'function') {
-                    load();
-                }
+                    // New email → add to the mailing list (non-blocking).
+                    if (!remote.exists) {
+                        fetch(FORMSPREE_URL, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                            body: JSON.stringify({ name: name, email: email })
+                        }).catch(function(err) { console.warn('Formspree fetch error:', err); });
+                    }
+                    setSyncStatus('Saved');
+                    startApp();
+                }).catch(function() {
+                    fail('Could not reach the server to load your progress. Check your connection and try again.');
+                });
             });
-
-            // Also re-enable button if user types while disabled (unlikely but safe)
-            nameInput.addEventListener('input', function() {
-                if (submitBtn.disabled && !submitBtn.textContent.includes('Submitting')) {
-                    submitBtn.disabled = false;
-                }
-            });
-            emailInput.addEventListener('input', function() {
-                if (submitBtn.disabled && !submitBtn.textContent.includes('Submitting')) {
-                    submitBtn.disabled = false;
-                }
-            });
-        })();
+        }
 
         // ============================================================
         //  DATA — 400 QUESTIONS (same as original)
@@ -2860,6 +2952,7 @@
             S.lastActive = Date.now();
             updateStreak();
             store.set(S);
+            sync.touch();
         }
 
         function updateStreak() {
@@ -3018,6 +3111,7 @@
         function doReset() { store.clear();
             S = freshState();
             store.set(S);
+            sync.touch();
             render(); }
 
         function toggleFlag() { if (!S.curId) return; var p = S.perQ[S.curId];
@@ -3049,7 +3143,7 @@
             if (MK.active && !MK.active.submitted && mockRemainingMs(MK.active) <= 0) { finalizeMock(MK.active, true, false); }
         }
 
-        function mockSave() { mstore.set(MK); }
+        function mockSave() { mstore.set(MK); sync.touch(); }
 
         function fmtClock(ms) { var s = Math.max(0, Math.round(ms / 1000));
             var m = Math.floor(s / 60);
@@ -4137,8 +4231,8 @@
             }
         });
 
-        load();
-        render();
+        document.getElementById("switchAcct").onclick = switchAccount;
+        boot();
     </script>
 </body>
 </html>
